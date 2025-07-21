@@ -1,113 +1,120 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-
-# === Funciones auxiliares ===
-def pedir_datos_manual(tipo):
-    precios, cantidades = [], []
-    print(f"\nPara la ecuación de {tipo}:")
+# === Helper functions ===
+def get_manual_data(kind: str):
+    """Prompt the user to enter price–quantity pairs manually."""
+    prices, quantities = [], []
+    print(f"\nEntering data for the {kind} equation:")
     while True:
         try:
-            precio = float(input("Ingresa un precio (o escribe -1 para terminar): $"))
-            if precio == -1:
+            price = float(input("Enter a price (or -1 to finish): $"))
+            if price == -1:
                 break
-            if precio < 0:
-                print("El precio no puede ser negativo. Intenta de nuevo.")
+            if price < 0:
+                print("Price cannot be negative. Try again.")
                 continue
-            cantidad = float(input(f"¿Cuánta es la {tipo} cuando el precio es ${precio:.2f}? "))
-            if cantidad < 0:
-                print("La cantidad no puede ser negativa. Intenta de nuevo.")
+
+            quantity = float(input("Enter the corresponding quantity: "))
+            if quantity < 0:
+                print("Quantity cannot be negative. Try again.")
                 continue
-            precios.append(precio)
-            cantidades.append(cantidad)
+
+            prices.append(price)
+            quantities.append(quantity)
+
         except ValueError:
-            print("Entrada no válida. Intenta de nuevo.")
-    if len(precios) < 2:
-        raise ValueError(f"Se necesitan al menos dos puntos para {tipo}.")
-    return np.array(precios), np.array(cantidades)
+            print("Invalid input. Please enter a number.")
+
+    return np.array(prices), np.array(quantities)
 
 
-def calcular_ajuste(precios, cantidades, tipo):
-    coef = np.polyfit(precios, cantidades, 1)
-    if tipo == "demanda" and coef[0] > 0:
-        raise ValueError("La pendiente de la demanda debe ser negativa.")
-    if tipo == "oferta" and coef[0] < 0:
-        raise ValueError("La pendiente de la oferta debe ser positiva.")
-    return coef
+def get_csv_data(filepath: str):
+    """Load price–quantity data from a CSV file (two columns, header row)."""
+    data = np.loadtxt(filepath, delimiter=",", skiprows=1)
+    return data[:, 0], data[:, 1]
 
 
-def calcular_equilibrio(coef_d, coef_o):
-    a_d, b_d = coef_d
-    a_o, b_o = coef_o
-    if a_d == a_o:
-        raise ValueError("Las pendientes son iguales, no hay equilibrio único.")
-    precio_eq = (b_o - b_d) / (a_d - a_o)
-    cantidad_eq = a_d * precio_eq + b_d
-    return precio_eq, cantidad_eq
+def fit_line(x: np.ndarray, y: np.ndarray):
+    """
+    Fit a linear model y = m x + b to the data.
+    Returns an array [m, b].
+    """
+    return np.polyfit(x, y, 1)
 
 
-def elasticidad_precio(pendiente, precio, cantidad):
-    return pendiente * (precio / cantidad)
+def calculate_equilibrium(coef_d: np.ndarray, coef_s: np.ndarray):
+    """
+    Given demand coef_d = [m_d, b_d] and supply coef_s = [m_s, b_s],
+    solve for equilibrium price and quantity:
+      m_d * P + b_d = m_s * P + b_s
+    """
+    m_d, b_d = coef_d
+    m_s, b_s = coef_s
+
+    price_eq = (b_s - b_d) / (m_d - m_s)
+    quantity_eq = m_d * price_eq + b_d
+    return price_eq, quantity_eq
 
 
-# === Flujo principal ===
-try:
-    precios_d, cantidades_d = pedir_datos_manual("demanda")
-    precios_o, cantidades_o = pedir_datos_manual("oferta")
+def compute_elasticity(coef: np.ndarray, price: float, quantity: float):
+    """
+    Compute price elasticity of demand (or supply):
+      elasticity = (dQ/dP) * (P / Q)
+    For a linear model Q = m P + b, dQ/dP = m.
+    """
+    m = coef[0]
+    return m * price / quantity
 
-    coef_d = calcular_ajuste(precios_d, cantidades_d, "demanda")
-    coef_o = calcular_ajuste(precios_o, cantidades_o, "oferta")
 
-    # Cálculo del equilibrio
-    precio_eq, cantidad_eq = calcular_equilibrio(coef_d, coef_o)
+# === Main script ===
+if __name__ == "__main__":
+    try:
+        mode = input("Select input mode (manual or csv): ").strip().lower()
+        if mode not in ("manual", "csv"):
+            raise ValueError("Mode must be 'manual' or 'csv'.")
 
-    # Elasticidad en el punto de equilibrio
-    elasticidad_d = elasticidad_precio(coef_d[0], precio_eq, cantidad_eq)
+        if mode == "manual":
+            x_d, y_d = get_manual_data("demand")
+            x_s, y_s = get_manual_data("supply")
+        else:
+            demand_file = input("Path to demand CSV file: ").strip()
+            supply_file = input("Path to supply CSV file: ").strip()
+            x_d, y_d = get_csv_data(demand_file)
+            x_s, y_s = get_csv_data(supply_file)
 
-    # Mostrar resultados sin redondeo prematuro
-    print("\n=== Resultados ===")
-    print(f"Ecuación de demanda: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P")
-    print(f"Ecuación de oferta: Qs = {coef_o[1]:.4f} + {coef_o[0]:.4f}P")
-    print(f"Precio de equilibrio: ${precio_eq:.4f}")
-    print(f"Cantidad de equilibrio: {cantidad_eq:.4f} unidades")
-    print(f"Elasticidad precio de la demanda en equilibrio: {elasticidad_d:.4f}")
+        # Fit linear models
+        coef_d = fit_line(x_d, y_d)  # [slope_d, intercept_d]
+        coef_s = fit_line(x_s, y_s)  # [slope_s, intercept_s]
 
-    # Graficar
-    p_min = min(min(precios_d), min(precios_o)) - 2
-    p_max = max(max(precios_d), max(precios_o)) + 2
-    p = np.linspace(p_min, p_max, 200)
-    q_d = coef_d[1] + coef_d[0] * p
-    q_o = coef_o[1] + coef_o[0] * p
+        # Compute equilibrium
+        price_eq, quantity_eq = calculate_equilibrium(coef_d, coef_s)
+        elasticity_d = compute_elasticity(coef_d, price_eq, quantity_eq)
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(p, q_d, 'b-', label="Demanda", linewidth=2)
-    plt.plot(p, q_o, 'orange', label="Oferta", linewidth=2)
-    plt.plot(precio_eq, cantidad_eq, 'ro', label="Equilibrio", markersize=8)
+        # Plot supply and demand curves
+        prices = np.linspace(0, max(x_d.max(), x_s.max()) * 1.1, 100)
+        demand_curve = coef_d[0] * prices + coef_d[1]
+        supply_curve = coef_s[0] * prices + coef_s[1]
 
-    # Añadir puntos de datos
-    plt.plot(precios_d, cantidades_d, 'bo', alpha=0.5)
-    plt.plot(precios_o, cantidades_o, 'o', color='orange', alpha=0.5)
+        plt.plot(prices, demand_curve, label="Demand")
+        plt.plot(prices, supply_curve, label="Supply")
+        plt.scatter([price_eq], [quantity_eq], color="red", label="Equilibrium")
+        plt.title("Supply and Demand Curves")
+        plt.xlabel("Price")
+        plt.ylabel("Quantity")
+        plt.legend()
+        plt.xlim(left=0)
+        plt.tight_layout()
+        plt.savefig("supply_demand_curves.png")
+        plt.show()
 
-    plt.xlabel("Precio ($)", fontsize=12)
-    plt.ylabel("Cantidad", fontsize=12)
-    plt.title("Curvas de Oferta y Demanda", fontsize=14)
-    plt.legend(fontsize=10)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.axhline(0, color='black', linewidth=0.5)
-    plt.axvline(0, color='black', linewidth=0.5)
-    plt.ylim(bottom=0)
-    plt.xlim(left=0)
-    plt.tight_layout()
-    plt.savefig("curvas_oferta_demanda.png")
-    plt.show()
+        # Save results to a text report
+        with open("equilibrium_report.txt", "w") as f:
+            f.write(f"Demand equation: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P\n")
+            f.write(f"Supply equation: Qs = {coef_s[1]:.4f} + {coef_s[0]:.4f}P\n")
+            f.write(f"Equilibrium price: ${price_eq:.4f}\n")
+            f.write(f"Equilibrium quantity: {quantity_eq:.4f}\n")
+            f.write(f"Price elasticity of demand: {elasticity_d:.4f}\n")
 
-    # Guardar resultados en txt
-    with open("reporte_equilibrio.txt", "w") as f:
-        f.write(f"Ecuación de demanda: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P\n")
-        f.write(f"Ecuación de oferta: Qs = {coef_o[1]:.4f} + {coef_o[0]:.4f}P\n")
-        f.write(f"Precio de equilibrio: ${precio_eq:.4f}\n")
-        f.write(f"Cantidad de equilibrio: {cantidad_eq:.4f} unidades\n")
-        f.write(f"Elasticidad precio de la demanda: {elasticidad_d:.4f}\n")
-
-except ValueError as e:
-    print(f"Error: {e}")
+    except ValueError as e:
+        print(f"Error: {e}")
