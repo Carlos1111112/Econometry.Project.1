@@ -1,220 +1,113 @@
-"""Simple supply and demand equilibrium estimator.
-
-This script allows entering pairs of prices and quantities for supply and
-demand either manually or via CSV files.  It fits linear or quadratic models
-to the observations, solves for the market equilibrium and finally plots the
-curves and saves a small text report.
-"""
-
-import argparse
-from pathlib import Path
-
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-# === Auxiliary functions ===
-def request_manual_data(data_type):
-    """Request price and quantity observations from the user."""
-
-    prices, quantities = [], []
-    print(f"\nFor the {data_type} equation:")
+# === Funciones auxiliares ===
+def pedir_datos_manual(tipo):
+    precios, cantidades = [], []
+    print(f"\nPara la ecuación de {tipo}:")
     while True:
         try:
-            price = float(input("Enter a price (or type -1 to finish): $"))
-            if price == -1:
+            precio = float(input("Ingresa un precio (o escribe -1 para terminar): $"))
+            if precio == -1:
                 break
-            if price < 0:
-                print("Price cannot be negative. Please try again.")
+            if precio < 0:
+                print("El precio no puede ser negativo. Intenta de nuevo.")
                 continue
-
-            quantity = float(input("Enter the corresponding quantity: "))
-            if quantity < 0:
-                print("Quantity cannot be negative. Please try again.")
+            cantidad = float(input(f"¿Cuánta es la {tipo} cuando el precio es ${precio:.2f}? "))
+            if cantidad < 0:
+                print("La cantidad no puede ser negativa. Intenta de nuevo.")
                 continue
-
-            prices.append(price)
-            quantities.append(quantity)
+            precios.append(precio)
+            cantidades.append(cantidad)
         except ValueError:
-            print("Invalid input. Please enter a numeric value.")
-    return np.array(prices), np.array(quantities)
+            print("Entrada no válida. Intenta de nuevo.")
+    if len(precios) < 2:
+        raise ValueError(f"Se necesitan al menos dos puntos para {tipo}.")
+    return np.array(precios), np.array(cantidades)
 
 
-def load_data_from_csv(filename, data_type):
-    """Load observations from a CSV file."""
-
-    data = np.loadtxt(filename, delimiter=",", skiprows=1)
-    prices = data[:, 0]
-    quantities = data[:, 1]
-    print(
-        f"\nLoaded {len(prices)} observations for {data_type} from '{filename}'."
-    )
-    return prices, quantities
+def calcular_ajuste(precios, cantidades, tipo):
+    coef = np.polyfit(precios, cantidades, 1)
+    if tipo == "demanda" and coef[0] > 0:
+        raise ValueError("La pendiente de la demanda debe ser negativa.")
+    if tipo == "oferta" and coef[0] < 0:
+        raise ValueError("La pendiente de la oferta debe ser positiva.")
+    return coef
 
 
-def calculate_fit(prices, quantities, data_type):
-    """Fit linear or quadratic model depending on goodness of fit."""
-
-    # Try linear fit
-    coef_lin = np.polyfit(prices, quantities, 1)
-    y_lin = np.polyval(coef_lin, prices)
-    error_lin = np.mean((quantities - y_lin) ** 2)
-    ss_tot = np.sum((quantities - np.mean(quantities)) ** 2)
-    r2_lin = 1 - (np.sum((quantities - y_lin) ** 2) / ss_tot) if ss_tot > 0 else 0.0
-
-    # If linear model is weak, try quadratic
-    if error_lin > 1e-2 or r2_lin < 0.8:
-        print(f"Warning: Linear fit for {data_type} has high error ({error_lin:.6f}) or low R² ({r2_lin:.6f}). Trying quadratic model.")
-        coef_quad = np.polyfit(prices, quantities, 2)
-        y_quad = np.polyval(coef_quad, prices)
-        error_quad = np.mean((quantities - y_quad) ** 2)
-        r2_quad = 1 - (np.sum((quantities - y_quad) ** 2) / ss_tot) if ss_tot > 0 else 0.0
-
-        if error_quad < error_lin and r2_quad > r2_lin:
-            print(f"Quadratic fit selected for {data_type} (error: {error_quad:.6f}, R²: {r2_quad:.6f}).")
-            # Return [slope, intercept, quad_coeff] for consistency
-            return np.array([coef_quad[1], coef_quad[0], coef_quad[2]])
-        else:
-            print(f"Keeping linear fit for {data_type} (error: {error_lin:.6f}, R²: {r2_lin:.6f}).")
-
-    else:
-        print(f"Linear fit sufficient for {data_type} (error: {error_lin:.6f}, R²: {r2_lin:.6f}).")
-
-    # Return [slope, intercept]
-    return np.array([coef_lin[0], coef_lin[1]])
+def calcular_equilibrio(coef_d, coef_o):
+    a_d, b_d = coef_d
+    a_o, b_o = coef_o
+    if a_d == a_o:
+        raise ValueError("Las pendientes son iguales, no hay equilibrio único.")
+    precio_eq = (b_o - b_d) / (a_d - a_o)
+    cantidad_eq = a_d * precio_eq + b_d
+    return precio_eq, cantidad_eq
 
 
-def calculate_equilibrium(coef_d, coef_o):
-    """Return equilibrium price and quantity from demand and supply fits."""
-
-    # coef = [slope, intercept] or [slope, intercept, quad_coeff]
-    if len(coef_d) == 2 and len(coef_o) == 2:
-        # Linear demand and supply
-        m_d, b_d = coef_d
-        m_o, b_o = coef_o
-        price_eq = (b_o - b_d) / (m_d - m_o)
-        quantity_eq = m_d * price_eq + b_d
-    else:
-        # For quadratic cases, solve m2*p^2 + m1*p + m0 = 0
-        # Construct p-dependent polynomials for Qd(p) and Qo(p)
-        # We'll solve Qd(p) = Qo(p)
-        # Let coef_d = [m_d, b_d, a_d] representing a_d * p^2 + m_d * p + b_d
-        a_d, m_d, b_d = coef_d[2], coef_d[0], coef_d[1]
-        a_o, m_o, b_o = coef_o[2], coef_o[0], coef_o[1]
-        # (a_d - a_o)p^2 + (m_d - m_o)p + (b_d - b_o) = 0
-        A = a_d - a_o
-        B = m_d - m_o
-        C = b_d - b_o
-        roots = np.roots([A, B, C])
-        # Choose the real, positive root
-        price_eq = next((r.real for r in roots if np.isreal(r) and r.real > 0), None)
-        quantity_eq = np.polyval(coef_d[::-1], price_eq)
-    return price_eq, quantity_eq
+def elasticidad_precio(pendiente, precio, cantidad):
+    return pendiente * (precio / cantidad)
 
 
-def price_elasticity(slope, price, quantity):
-    """Calculate price elasticity from slope and a price/quantity pair."""
+# === Flujo principal ===
+try:
+    precios_d, cantidades_d = pedir_datos_manual("demanda")
+    precios_o, cantidades_o = pedir_datos_manual("oferta")
 
-    return slope * (price / quantity)
+    coef_d = calcular_ajuste(precios_d, cantidades_d, "demanda")
+    coef_o = calcular_ajuste(precios_o, cantidades_o, "oferta")
 
+    # Cálculo del equilibrio
+    precio_eq, cantidad_eq = calcular_equilibrio(coef_d, coef_o)
 
+    # Elasticidad en el punto de equilibrio
+    elasticidad_d = elasticidad_precio(coef_d[0], precio_eq, cantidad_eq)
 
-def main(argv=None):
-    """Entry point for command line execution."""
+    # Mostrar resultados sin redondeo prematuro
+    print("\n=== Resultados ===")
+    print(f"Ecuación de demanda: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P")
+    print(f"Ecuación de oferta: Qs = {coef_o[1]:.4f} + {coef_o[0]:.4f}P")
+    print(f"Precio de equilibrio: ${precio_eq:.4f}")
+    print(f"Cantidad de equilibrio: {cantidad_eq:.4f} unidades")
+    print(f"Elasticidad precio de la demanda en equilibrio: {elasticidad_d:.4f}")
 
-    parser = argparse.ArgumentParser(
-        description="Estimate supply and demand equilibrium from observations"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["manual", "csv"],
-        default="manual",
-        help="Data entry mode",
-    )
-    parser.add_argument("--demand-file", type=Path, help="CSV file for demand")
-    parser.add_argument("--supply-file", type=Path, help="CSV file for supply")
-    parser.add_argument(
-        "--no-plot", action="store_true", help="Disable interactive plot display"
-    )
-    args = parser.parse_args(argv)
+    # Graficar
+    p_min = min(min(precios_d), min(precios_o)) - 2
+    p_max = max(max(precios_d), max(precios_o)) + 2
+    p = np.linspace(p_min, p_max, 200)
+    q_d = coef_d[1] + coef_d[0] * p
+    q_o = coef_o[1] + coef_o[0] * p
 
-    try:
-        if args.mode == "csv":
-            if not args.demand_file or not args.supply_file:
-                parser.error("CSV mode requires --demand-file and --supply-file")
-            prices_d, quantities_d = load_data_from_csv(args.demand_file, "demand")
-            prices_o, quantities_o = load_data_from_csv(args.supply_file, "supply")
-        else:
-            prices_d, quantities_d = request_manual_data("demand")
-            prices_o, quantities_o = request_manual_data("supply")
+    plt.figure(figsize=(8, 6))
+    plt.plot(p, q_d, 'b-', label="Demanda", linewidth=2)
+    plt.plot(p, q_o, 'orange', label="Oferta", linewidth=2)
+    plt.plot(precio_eq, cantidad_eq, 'ro', label="Equilibrio", markersize=8)
 
-        # Compute fits
-        coef_d = calculate_fit(prices_d, quantities_d, "demand")
-        coef_o = calculate_fit(prices_o, quantities_o, "supply")
+    # Añadir puntos de datos
+    plt.plot(precios_d, cantidades_d, 'bo', alpha=0.5)
+    plt.plot(precios_o, cantidades_o, 'o', color='orange', alpha=0.5)
 
-        # Compute equilibrium
-        price_eq, quantity_eq = calculate_equilibrium(coef_d, coef_o)
+    plt.xlabel("Precio ($)", fontsize=12)
+    plt.ylabel("Cantidad", fontsize=12)
+    plt.title("Curvas de Oferta y Demanda", fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.axhline(0, color='black', linewidth=0.5)
+    plt.axvline(0, color='black', linewidth=0.5)
+    plt.ylim(bottom=0)
+    plt.xlim(left=0)
+    plt.tight_layout()
+    plt.savefig("curvas_oferta_demanda.png")
+    plt.show()
 
-        # Compute elasticity at equilibrium
-        elasticity_d = price_elasticity(coef_d[0], price_eq, quantity_eq)
+    # Guardar resultados en txt
+    with open("reporte_equilibrio.txt", "w") as f:
+        f.write(f"Ecuación de demanda: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P\n")
+        f.write(f"Ecuación de oferta: Qs = {coef_o[1]:.4f} + {coef_o[0]:.4f}P\n")
+        f.write(f"Precio de equilibrio: ${precio_eq:.4f}\n")
+        f.write(f"Cantidad de equilibrio: {cantidad_eq:.4f} unidades\n")
+        f.write(f"Elasticidad precio de la demanda: {elasticidad_d:.4f}\n")
 
-        # Display results
-        eq_d_str = (
-            "Qd = "
-            + " + ".join([f"{c:.8f}" for c in coef_d[::-1]]).replace("+ -", "- ")
-            + "P"
-            + (" + ..." if len(coef_d) > 2 else "")
-        )
-        eq_o_str = (
-            "Qs = "
-            + " + ".join([f"{c:.8f}" for c in coef_o[::-1]]).replace("+ -", "- ")
-            + "P"
-            + (" + ..." if len(coef_o) > 2 else "")
-        )
-
-        print("\n=== Results ===")
-        print(f"Demand equation: {eq_d_str}")
-        print(f"Supply equation: {eq_o_str}")
-        print(f"Equilibrium price: ${price_eq:.8f}")
-        print(f"Equilibrium quantity: {quantity_eq:.8f} units")
-        print(f"Price elasticity of demand at equilibrium: {elasticity_d:.8f}")
-
-        # Plot curves
-        p_min = min(prices_d.min(), prices_o.min()) - 5
-        p_max = max(prices_d.max(), prices_o.max()) + 5
-        p = np.linspace(p_min, p_max, 400)
-
-        def eval_curve(coefs, p_vals):
-            if len(coefs) == 3:
-                return np.polyval(coefs[::-1], p_vals)
-            return coefs[0] * p_vals + coefs[1]
-
-        q_d = eval_curve(coef_d, p)
-        q_o = eval_curve(coef_o, p)
-
-        plt.figure(figsize=(10, 7))
-        plt.plot(p, q_d, label="Demand", linewidth=2)
-        plt.plot(p, q_o, label="Supply", linewidth=2)
-        plt.xlabel("Price")
-        plt.ylabel("Quantity")
-        plt.title("Supply and Demand Curves")
-        plt.legend()
-        plt.xlim(left=0)
-        plt.tight_layout()
-        plt.savefig("supply_demand_curves.png")
-        if not args.no_plot:
-            plt.show()
-
-        # Save report to text file
-        with open("equilibrium_report.txt", "w") as f:
-            f.write(f"Demand equation: {eq_d_str}\n")
-            f.write(f"Supply equation: {eq_o_str}\n")
-            f.write(f"Equilibrium price: ${price_eq:.8f}\n")
-            f.write(f"Equilibrium quantity: {quantity_eq:.8f} units\n")
-            f.write(f"Price elasticity of demand: {elasticity_d:.8f}\n")
-    except ValueError as exc:
-        print(f"Error: {exc}")
-
-
-if __name__ == "__main__":
-    main()
+except ValueError as e:
+    print(f"Error: {e}")
