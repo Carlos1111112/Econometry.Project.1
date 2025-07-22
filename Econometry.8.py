@@ -1,153 +1,292 @@
-"""Tools for computing supply and demand equilibrium."""
+"""Supply and demand equilibrium analysis with flexible model fitting."""
+
+from __future__ import annotations
 
 import argparse
-import numpy as np
+import csv
+import json
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, Tuple
+
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import curve_fit, fsolve
 
-# === Helper functions ===
-def get_manual_data(kind: str):
-    """Prompt the user to manually enter price--quantity pairs."""
 
-    prices, quantities = [], []
-    print(f"\nEntering data for the {kind} equation:")
+# ===========================
+# Data handling
+# ===========================
 
+def load_manual_data(kind: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Prompt the user to manually enter ``(price, quantity)`` pairs."""
+    prices: list[float] = []
+    quantities: list[float] = []
+    print(f"\nEntering data for {kind} equation. Use -1 to finish.")
     while True:
         try:
-            price = float(input("Enter a price (or -1 to finish): $"))
-            if price == -1:
+            p = float(input("Price: $"))
+            if p == -1:
                 break
-            if price < 0:
-                print("Price cannot be negative. Try again.")
+            if p < 0:
+                print("Price cannot be negative.")
                 continue
-
-            quantity = float(input("Enter the corresponding quantity: "))
-            if quantity < 0:
-                print("Quantity cannot be negative. Try again.")
+            q = float(input("Quantity: "))
+            if q < 0:
+                print("Quantity cannot be negative.")
                 continue
-
-            prices.append(price)
-            quantities.append(quantity)
-
+            prices.append(p)
+            quantities.append(q)
         except ValueError:
-            print("Invalid input. Please enter a number.")
-
+            print("Invalid number. Try again.")
     return np.array(prices), np.array(quantities)
 
 
-def get_csv_data(filepath: str):
-    """Load price--quantity data from a CSV file."""
+def load_csv_data(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load ``(price, quantity)`` data from a CSV file with two columns."""
+    with open(path, "r", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = [row for row in reader if row]
+    if not rows:
+        raise ValueError(f"No data found in {path}")
+    prices, quantities = zip(*[(float(r[0]), float(r[1])) for r in rows])
+    return np.array(prices), np.array(quantities)
 
-    data = np.loadtxt(filepath, delimiter=",", skiprows=1)
-    return data[:, 0], data[:, 1]
+
+# ===========================
+# Model definitions
+# ===========================
+
+def linear_func(P: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Simple linear function ``Q = a*P + b``."""
+    return a * P + b
 
 
-def fit_line(x: np.ndarray, y: np.ndarray):
-    """Return slope and intercept of the best fitting line."""
+def exp_func(P: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    """Exponential function ``Q = a * exp(b*P) + c``."""
+    return a * np.exp(b * P) + c
 
-    return np.polyfit(x, y, 1)
+
+def logistic_func(P: np.ndarray, L: float, k: float, x0: float) -> np.ndarray:
+    """Logistic curve with carrying capacity ``L``."""
+    return L / (1 + np.exp(-k * (P - x0)))
 
 
-def calculate_equilibrium(coef_d: np.ndarray, coef_s: np.ndarray):
-    """Return price and quantity at which demand equals supply."""
+def power_func(P: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Power law ``Q = a * P**b``."""
+    return a * P ** b
 
-    m_d, b_d = coef_d
-    m_s, b_s = coef_s
 
-    if np.isclose(m_d, m_s):
-        raise ValueError("Supply and demand curves are parallel; no equilibrium.")
+def create_poly_func(degree: int) -> Callable[[np.ndarray, float], np.ndarray]:
+    """Return a polynomial model of a given degree."""
 
-    price_eq = (b_s - b_d) / (m_d - m_s)
-    quantity_eq = m_d * price_eq + b_d
+    def func(P: np.ndarray, *coeffs: float) -> np.ndarray:
+        return np.polyval(coeffs, P)
+
+    func.__name__ = f"poly{degree}"
+    return func
+
+
+MODEL_REGISTRY: Dict[str, Callable] = {
+    "linear": linear_func,
+    "exp": exp_func,
+    "logistic": logistic_func,
+    "power": power_func,
+}
+
+
+# ===========================
+# Fitting utilities
+# ===========================
+
+@dataclass
+class FitResult:
+    func: Callable[[np.ndarray], np.ndarray]
+    params: Tuple[float, ...]
+    r2: float
+
+
+def get_model(name: str, degree: int | None = None) -> Callable:
+    """Return a model function based on ``name``.
+
+    Polynomial models can specify the degree either in the name (e.g. ``poly3``)
+    or via the ``degree`` argument.
+    """
+
+    if name.startswith("poly"):
+        deg = int(name[4:]) if len(name) > 4 else degree or 2
+        return create_poly_func(deg)
+    if name not in MODEL_REGISTRY:
+        raise KeyError(f"Unknown model '{name}'")
+    return MODEL_REGISTRY[name]
+
+
+def fit_model(
+    x: np.ndarray, y: np.ndarray, model_name: str, degree: int | None = None
+) -> FitResult:
+    """Fit a named model to data and return :class:`FitResult`."""
+
+    model = get_model(model_name, degree)
+    guess = np.ones(model.__code__.co_argcount - 1)
+    popt, _ = curve_fit(model, x, y, p0=guess, maxfev=10000)
+
+    def fitted_func(P: np.ndarray) -> np.ndarray:
+        return model(P, *popt)
+
+    residuals = y - fitted_func(x)
+    ss_res = np.sum(residuals ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r2 = 1 - ss_res / ss_tot
+    return FitResult(fitted_func, tuple(popt), float(r2))
+
+
+def numerical_elasticity(func: Callable[[float], float], price: float) -> float:
+    """Compute price elasticity using a central difference derivative."""
+
+    eps = 1e-6
+    q = func(price)
+    dqdp = (func(price + eps) - func(price - eps)) / (2 * eps)
+    if q == 0:
+        raise ValueError("Quantity is zero; elasticity undefined")
+    return dqdp * price / q
+
+
+def find_equilibrium(
+    demand: Callable[[float], float],
+    supply: Callable[[float], float],
+    guess: float,
+) -> Tuple[float, float]:
+    """Solve for the price where demand equals supply."""
+
+    root = fsolve(lambda p: demand(p) - supply(p), x0=guess)
+    price_eq = float(root[0])
+    quantity_eq = float(demand(price_eq))
     return price_eq, quantity_eq
 
 
-def compute_elasticity(coef: np.ndarray, price: float, quantity: float):
-    """Return price elasticity for a linear model Q = mP + b."""
+# ===========================
+# Plotting and reporting
+# ===========================
 
-    m = coef[0]
-    if quantity == 0:
-        raise ValueError("Quantity cannot be zero when computing elasticity.")
-    return m * price / quantity
+def plot_curves(
+    demand: Callable[[np.ndarray], np.ndarray],
+    supply: Callable[[np.ndarray], np.ndarray],
+    price_eq: float,
+    quantity_eq: float,
+    x_label: str,
+    y_label: str,
+    log_scale: bool,
+    filename: str | None = None,
+) -> None:
+    """Plot demand and supply curves and the equilibrium point."""
+
+    prices = np.linspace(0, price_eq * 1.5 if price_eq > 0 else 10, 200)
+    plt.figure()
+    plt.plot(prices, demand(prices), label="Demand")
+    plt.plot(prices, supply(prices), label="Supply")
+    plt.scatter([price_eq], [quantity_eq], color="red", label="Equilibrium")
+    if log_scale:
+        plt.yscale("log")
+        plt.xscale("log")
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.legend()
+    plt.tight_layout()
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-# === Main script ===
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Compute the market equilibrium from supply and demand data",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["manual", "csv"],
-        default="manual",
-        help="input mode",
-    )
-    parser.add_argument("--demand-file", help="CSV file with demand observations")
-    parser.add_argument("--supply-file", help="CSV file with supply observations")
-    parser.add_argument(
-        "--no-plot", action="store_true", help="disable displaying the plot"
-    )
+def write_report(report: dict, to_json: bool) -> None:
+    """Write report dictionary to ``txt`` or ``json`` file."""
 
-    args = parser.parse_args()
-
-    try:
-        if args.mode == "manual":
-            x_d, y_d = get_manual_data("demand")
-            x_s, y_s = get_manual_data("supply")
-        else:
-            if not args.demand_file or not args.supply_file:
-                parser.error(
-                    "CSV mode requires both --demand-file and --supply-file."
-                )
-            x_d, y_d = get_csv_data(args.demand_file)
-            x_s, y_s = get_csv_data(args.supply_file)
-
-        # Fit linear models
-        coef_d = fit_line(x_d, y_d)
-        coef_s = fit_line(x_s, y_s)
-
-        # Compute equilibrium and elasticities
-        price_eq, quantity_eq = calculate_equilibrium(coef_d, coef_s)
-        elasticity_d = compute_elasticity(coef_d, price_eq, quantity_eq)
-        elasticity_s = compute_elasticity(coef_s, price_eq, quantity_eq)
-
-        print(f"Demand equation: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P")
-        print(f"Supply equation: Qs = {coef_s[1]:.4f} + {coef_s[0]:.4f}P")
-        print(f"Equilibrium price: ${price_eq:.4f}")
-        print(f"Equilibrium quantity: {quantity_eq:.4f}")
-        print(
-            f"Price elasticity of demand at equilibrium: {elasticity_d:.4f}"
-        )
-        print(
-            f"Price elasticity of supply at equilibrium: {elasticity_s:.4f}"
-        )
-
+    if to_json:
+        with open("equilibrium_report.json", "w") as f:
+            json.dump(report, f, indent=2)
+    else:
         with open("equilibrium_report.txt", "w") as f:
-            f.write(f"Demand equation: Qd = {coef_d[1]:.4f} + {coef_d[0]:.4f}P\n")
-            f.write(f"Supply equation: Qs = {coef_s[1]:.4f} + {coef_s[0]:.4f}P\n")
-            f.write(f"Equilibrium price: ${price_eq:.4f}\n")
-            f.write(f"Equilibrium quantity: {quantity_eq:.4f}\n")
-            f.write(f"Price elasticity of demand: {elasticity_d:.4f}\n")
-            f.write(f"Price elasticity of supply: {elasticity_s:.4f}\n")
+            for k, v in report.items():
+                f.write(f"{k}: {v}\n")
 
-        if not args.no_plot:
-            prices = np.linspace(0, max(x_d.max(), x_s.max()) * 1.1, 100)
-            demand_curve = coef_d[0] * prices + coef_d[1]
-            supply_curve = coef_s[0] * prices + coef_s[1]
 
-            plt.plot(prices, demand_curve, label="Demand")
-            plt.plot(prices, supply_curve, label="Supply")
-            plt.scatter([price_eq], [quantity_eq], color="red", label="Equilibrium")
-            plt.title("Supply and Demand Curves")
-            plt.xlabel("Price")
-            plt.ylabel("Quantity")
-            plt.legend()
-            plt.xlim(left=0)
-            plt.tight_layout()
-            plt.savefig("supply_demand_curves.png")
-            plt.show()
+# ===========================
+# CLI
+# ===========================
 
-    except ValueError as exc:
-        print(f"Error: {exc}")
+def parse_model_option(option: str) -> Dict[str, str]:
+    """Parse ``--model`` option into a mapping of curve names."""
+
+    mapping: Dict[str, str] = {"demand": "linear", "supply": "linear"}
+    pairs = [p for p in option.split(",") if p]
+    for pair in pairs:
+        if ":" not in pair:
+            continue
+        side, model = pair.split(":", 1)
+        if side in ("demand", "supply"):
+            mapping[side] = model
+    return mapping
+
+
+def main(argv: Iterable[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Supply and demand analysis")
+    parser.add_argument("--mode", choices=["manual", "csv"], default="manual")
+    parser.add_argument("--demand-file")
+    parser.add_argument("--supply-file")
+    parser.add_argument("--model", default="demand:linear,supply:linear")
+    parser.add_argument("--degree", type=int, default=2)
+    parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--output-json", action="store_true")
+    parser.add_argument("--log-scale", action="store_true")
+    parser.add_argument("--xlabel", default="Price")
+    parser.add_argument("--ylabel", default="Quantity")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.mode == "csv":
+        if not args.demand_file or not args.supply_file:
+            parser.error("CSV mode requires --demand-file and --supply-file")
+        x_d, y_d = load_csv_data(args.demand_file)
+        x_s, y_s = load_csv_data(args.supply_file)
+    else:
+        x_d, y_d = load_manual_data("demand")
+        x_s, y_s = load_manual_data("supply")
+
+    models = parse_model_option(args.model)
+    demand_fit = fit_model(x_d, y_d, models["demand"], args.degree)
+    supply_fit = fit_model(x_s, y_s, models["supply"], args.degree)
+
+    guess = np.mean(np.concatenate([x_d, x_s]))
+    price_eq, quantity_eq = find_equilibrium(demand_fit.func, supply_fit.func, guess)
+
+    elasticity_d = numerical_elasticity(demand_fit.func, price_eq)
+    elasticity_s = numerical_elasticity(supply_fit.func, price_eq)
+
+    report = {
+        "demand_model": models["demand"],
+        "supply_model": models["supply"],
+        "demand_params": demand_fit.params,
+        "supply_params": supply_fit.params,
+        "r2_demand": demand_fit.r2,
+        "r2_supply": supply_fit.r2,
+        "equilibrium_price": price_eq,
+        "equilibrium_quantity": quantity_eq,
+        "elasticity_demand": elasticity_d,
+        "elasticity_supply": elasticity_s,
+    }
+
+    write_report(report, args.output_json)
+
+    if not args.no_plot:
+        plot_curves(
+            demand_fit.func,
+            supply_fit.func,
+            price_eq,
+            quantity_eq,
+            args.xlabel,
+            args.ylabel,
+            args.log_scale,
+            None,
+        )
 
 
 if __name__ == "__main__":
